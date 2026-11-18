@@ -33,7 +33,7 @@ export default function Voters() {
   const [filters, setFilters] = useState(initialFilters);
 
   const [page, setPage] = useState(0);
-  const [hasNextPage, setHasNextPage] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -69,7 +69,8 @@ export default function Voters() {
               photo_path,
               panchayat_serial_number,
               relative_name_english
-            `
+            `,
+            { count: "exact" }
           );
 
         // Search only the approved fields: English names, Voter ID and V.Sno.
@@ -115,18 +116,18 @@ export default function Voters() {
         }
 
         const from = page * PAGE_SIZE;
-        const to = from + PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
 
-        const { data, error: queryError } = await query
+        const { data, count, error: queryError } = await query
+          .order("panchayat_serial_number", { ascending: true })
           .order("voter_id", { ascending: true })
           .range(from, to);
 
         if (queryError) throw queryError;
 
         if (!cancelled) {
-          const rows = data || [];
-          setHasNextPage(rows.length > PAGE_SIZE);
-          setVoters(rows.slice(0, PAGE_SIZE));
+          setVoters(data || []);
+          setTotalCount(count || 0);
         }
       } catch (err) {
         console.error("Voter directory error:", err);
@@ -134,7 +135,7 @@ export default function Voters() {
         if (!cancelled) {
           setError(err.message || "Unable to load voter records.");
           setVoters([]);
-          setHasNextPage(false);
+          setTotalCount(0);
         }
       } finally {
         if (!cancelled) {
@@ -148,6 +149,8 @@ export default function Voters() {
       clearTimeout(timer);
     };
   }, [search, filters, page]);
+
+  const totalPages = Math.ceil(totalCount / PAGE_SIZE);
 
   function updateFilter(key, value) {
     setFilters((previous) => ({
@@ -194,8 +197,28 @@ export default function Voters() {
   return (
     <section className="space-y-6">
 
+      {/* Heading */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-semibold text-slate-900">
+            Voter Directory
+          </h2>
+
+          <p className="mt-1 text-sm text-slate-500">
+            Search and manage Narasannapalem electoral records.
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-slate-200 bg-white px-4 py-2">
+          <p className="text-xs text-slate-500">Matching records</p>
+          <p className="text-lg font-bold text-slate-900">
+            {totalCount.toLocaleString("en-IN")}
+          </p>
+        </div>
+      </div>
+
       {/* Search and filters */}
-      <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="rounded-2xl border border-slate-200 bg-white p-4">
         <div className="flex flex-col gap-3 md:flex-row">
           <div className="relative flex-1">
             <Search
@@ -231,7 +254,10 @@ export default function Voters() {
 
           <button
             type="button"
-            onClick={clearFilters}
+            onClick={() => {
+              setSearch("");
+              clearFilters();
+            }}
             className="flex items-center justify-center gap-2 rounded-xl border border-slate-200 px-4 py-3 text-sm hover:bg-slate-50"
           >
             <RefreshCw size={16} />
@@ -327,7 +353,7 @@ export default function Voters() {
       )}
 
       {/* Voter table */}
-      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
 
         <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
           <div>
@@ -337,15 +363,45 @@ export default function Voters() {
             <p className="mt-1 text-xs text-slate-500">
               {loading
                 ? "Retrieving records..."
-                : `Showing ${voters.length} record${voters.length === 1 ? "" : "s"} on this page`}
+                : `Showing ${voters.length} of ${totalCount.toLocaleString("en-IN")} records`}
             </p>
           </div>
 
           <Users className="text-slate-400" size={21} />
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[0] table-fixed text-left md:min-w-[950px] md:table-auto">
+        {/* Compact cards on phones */}
+        <div className="divide-y divide-slate-100 md:hidden">
+          {loading ? (
+            <p className="px-4 py-10 text-center text-sm text-slate-500">Loading voter records...</p>
+          ) : voters.length === 0 ? (
+            <p className="px-4 py-10 text-center text-sm text-slate-500">No voter records found.</p>
+          ) : (
+            voters.map((voter) => (
+              <article key={voter.voter_id} className="flex items-center gap-3 px-4 py-4">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-sm font-semibold text-slate-700">
+                  {voter.panchayat_serial_number ?? "—"}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold text-slate-900">{voter.english_name || "—"}</p>
+                  {voter.telugu_name && <p className="mt-0.5 truncate text-xs text-slate-500">{voter.telugu_name}</p>}
+                  <p className="mt-1 font-mono text-xs text-blue-700">{voter.voter_id}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => openVoter(voter)}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700"
+                >
+                  <Eye size={14} /> View
+                </button>
+              </article>
+            ))
+          )}
+        </div>
+
+        {/* Full table on tablet and desktop */}
+        <div className="hidden overflow-x-auto md:block">
+          <table className="w-full min-w-[950px] text-left">
             <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
               <tr>
                 <th className="w-[56px] px-2 py-3 text-xs font-semibold sm:px-3 md:w-auto md:px-5 md:py-4">V.Sno</th>
@@ -450,7 +506,7 @@ export default function Voters() {
         {/* Pagination */}
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-5 py-4">
           <p className="text-xs text-slate-500">
-            Page {page + 1}
+            Page {totalPages === 0 ? 0 : page + 1} of {totalPages}
           </p>
 
           <div className="flex items-center gap-2">
@@ -466,7 +522,7 @@ export default function Voters() {
 
             <button
               type="button"
-              disabled={!hasNextPage || loading}
+              disabled={page + 1 >= totalPages || loading}
               onClick={() => setPage((previous) => previous + 1)}
               className="flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
             >

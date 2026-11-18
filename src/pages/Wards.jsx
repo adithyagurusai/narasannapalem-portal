@@ -10,6 +10,7 @@ import {
   ChevronRight,
   Download,
   X,
+  RefreshCw,
 } from "lucide-react";
 import { supabase } from "../lib/supabase.js";
 
@@ -33,7 +34,7 @@ export default function Wards() {
   const [voters, setVoters] = useState([]);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
-  const [hasNextPage, setHasNextPage] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
 
   const [loadingVoters, setLoadingVoters] = useState(false);
   const [voterError, setVoterError] = useState("");
@@ -49,7 +50,7 @@ export default function Wards() {
     }
   }, [selectedWard]);
 
-  // Load aggregated ward statistics from PostgreSQL.
+  // Load statistics for all wards.
   useEffect(() => {
     let cancelled = false;
 
@@ -58,32 +59,58 @@ export default function Wards() {
       setStatsError("");
 
       try {
-        const { data, error } = await supabase.rpc("get_ward_stats");
-        if (error) throw error;
+        const counts = {};
 
-        const byWard = new Map(
-          (data || []).map((row) => [
-            `Ward ${String(row.ward_number).padStart(2, "0")}`,
-            {
-              total: Number(row.total_voters || 0),
-              male: Number(row.male_voters || 0),
-              female: Number(row.female_voters || 0),
-            },
-          ])
-        );
+        WARD_NAMES.forEach((ward) => {
+          counts[ward] = {
+            total: 0,
+            male: 0,
+            female: 0,
+          };
+        });
+
+        for (let from = 0; ; from += 1000) {
+          const { data, error } = await supabase
+            .from("voters")
+            .select("ward_number, gender")
+            .order("voter_id", { ascending: true })
+            .range(from, from + 999);
+
+          if (error) throw error;
+
+          (data || []).forEach((voter) => {
+            const ward = voter.ward_number;
+
+            if (!counts[ward]) return;
+
+            counts[ward].total += 1;
+
+            const gender = String(voter.gender || "")
+              .trim()
+              .toLowerCase();
+
+            if (gender === "male") counts[ward].male += 1;
+            if (gender === "female") counts[ward].female += 1;
+          });
+
+          if (!data || data.length < 1000) break;
+        }
 
         if (!cancelled) {
           setWardStats(
             WARD_NAMES.map((ward) => ({
               ward,
-              ...(byWard.get(ward) || { total: 0, male: 0, female: 0 }),
+              ...counts[ward],
             }))
           );
         }
       } catch (err) {
         console.error("Ward statistics error:", err);
+
         if (!cancelled) {
-          setStatsError(err.message || "Unable to load ward statistics.");
+          setStatsError(
+            err.message || "Unable to load ward statistics."
+          );
         }
       } finally {
         if (!cancelled) setLoadingStats(false);
@@ -123,7 +150,8 @@ export default function Wards() {
               relative_name,
               panchayat_serial_number,
               relative_name_english
-            `
+            `,
+            { count: "exact" }
           )
           .eq("ward_number", selectedWard);
 
@@ -145,18 +173,18 @@ export default function Wards() {
         }
 
         const from = page * PAGE_SIZE;
-        const to = from + PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
 
-        const { data, error } = await query
+        const { data, count, error } = await query
+          .order("panchayat_serial_number", { ascending: true })
           .order("voter_id", { ascending: true })
           .range(from, to);
 
         if (error) throw error;
 
         if (!cancelled) {
-          const rows = data || [];
-          setHasNextPage(rows.length > PAGE_SIZE);
-          setVoters(rows.slice(0, PAGE_SIZE));
+          setVoters(data || []);
+          setTotalCount(count || 0);
         }
       } catch (err) {
         console.error("Ward voter loading error:", err);
@@ -166,7 +194,7 @@ export default function Wards() {
             err.message || "Unable to load voters."
           );
           setVoters([]);
-          setHasNextPage(false);
+          setTotalCount(0);
         }
       } finally {
         if (!cancelled) setLoadingVoters(false);
@@ -194,6 +222,8 @@ export default function Wards() {
     (sum, ward) => sum + ward.female,
     0
   );
+
+  const totalPages = Math.ceil(totalCount / PAGE_SIZE);
 
   function selectWard(ward) {
     setSelectedWard(ward);
@@ -258,6 +288,7 @@ export default function Wards() {
 
       for (let from = 0; ; from += 1000) {
         const { data, error } = await query
+          .order("panchayat_serial_number", { ascending: true })
           .order("voter_id", { ascending: true })
           .range(from, from + 999);
 
@@ -328,6 +359,16 @@ export default function Wards() {
 
   return (
     <section className="space-y-6">
+      {/* Heading */}
+      <div>
+        <h2 className="text-xl font-semibold text-slate-900">
+          Ward Directory
+        </h2>
+        <p className="mt-1 text-sm text-slate-500">
+          Browse voter statistics and electoral records across all 10 wards.
+        </p>
+      </div>
+
       {/* Overall statistics */}
       <div className="grid gap-4 sm:grid-cols-3">
         <div className="rounded-2xl border border-slate-200 bg-white p-5">
@@ -440,7 +481,7 @@ export default function Wards() {
       {selectedWard && (
         <div
           ref={voterRecordsRef}
-          className="scroll-mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
+          className="scroll-mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white"
         >
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 p-5">
             <div>
@@ -448,7 +489,7 @@ export default function Wards() {
                 {selectedWard} — Voter Records
               </h3>
               <p className="mt-1 text-xs text-slate-500">
-                {voters.length} record{voters.length === 1 ? "" : "s"} on this page
+                {totalCount.toLocaleString("en-IN")} matching voters
               </p>
             </div>
 
@@ -457,7 +498,7 @@ export default function Wards() {
                 <button
                   type="button"
                   onClick={exportWardCsv}
-                  disabled={exporting || loadingVoters || voters.length === 0}
+                  disabled={exporting || totalCount === 0}
                   className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
                 >
                   <Download size={15} />
@@ -502,18 +543,40 @@ export default function Wards() {
             </div>
           )}
 
-          {/* Voter table */}
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[0] text-left md:min-w-[850px]">
+          {/* Compact cards on phones */}
+          <div className="divide-y divide-slate-100 md:hidden">
+            {loadingVoters ? (
+              <p className="px-4 py-10 text-center text-sm text-slate-500">Loading voter records...</p>
+            ) : voters.length === 0 ? (
+              <p className="px-4 py-10 text-center text-sm text-slate-500">No voter records found.</p>
+            ) : (
+              voters.map((voter) => (
+                <article key={voter.voter_id} className="flex items-center gap-3 px-4 py-4">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-sm font-semibold text-slate-700">
+                    {voter.panchayat_serial_number ?? "—"}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-semibold text-slate-900">{voter.english_name || "—"}</p>
+                    {voter.telugu_name && <p className="mt-0.5 truncate text-xs text-slate-500">{voter.telugu_name}</p>}
+                    <p className="mt-1 font-mono text-xs text-blue-700">{voter.voter_id}</p>
+                  </div>
+                </article>
+              ))
+            )}
+          </div>
+
+          {/* Full table on tablet and desktop */}
+          <div className="hidden overflow-x-auto md:block">
+            <table className="w-full min-w-[850px] text-left">
               <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                 <tr>
                   <th className="px-5 py-4 font-semibold">V.Sno</th>
                   <th className="px-5 py-4 font-semibold">Voter ID</th>
                   <th className="px-5 py-4 font-semibold">Name</th>
-                  <th className="hidden px-5 py-4 font-semibold md:table-cell">Relative</th>
-                  <th className="hidden px-5 py-4 font-semibold md:table-cell">Age</th>
-                  <th className="hidden px-5 py-4 font-semibold md:table-cell">Gender</th>
-                  <th className="hidden px-5 py-4 font-semibold md:table-cell">House No.</th>
+                  <th className="px-5 py-4 font-semibold">Relative</th>
+                  <th className="px-5 py-4 font-semibold">Age</th>
+                  <th className="px-5 py-4 font-semibold">Gender</th>
+                  <th className="px-5 py-4 font-semibold">House No.</th>
                 </tr>
               </thead>
 
@@ -537,7 +600,7 @@ export default function Wards() {
                         {voter.panchayat_serial_number ?? "—"}
                       </td>
 
-                      <td className="break-all px-2 py-3 font-mono text-[10px] font-medium text-blue-700 sm:px-3 sm:text-xs md:px-5 md:py-4 md:text-sm">
+                      <td className="px-5 py-4 font-mono text-sm font-medium text-blue-700">
                         {voter.voter_id}
                       </td>
 
@@ -552,7 +615,7 @@ export default function Wards() {
                         )}
                       </td>
 
-                      <td className="hidden px-5 py-4 md:table-cell">
+                      <td className="px-5 py-4">
                         <p className="text-sm text-slate-800">
                           {voter.relative_name_english || "—"}
                         </p>
@@ -563,15 +626,15 @@ export default function Wards() {
                         )}
                       </td>
 
-                      <td className="hidden px-5 py-4 text-sm text-slate-600 md:table-cell">
+                      <td className="px-5 py-4 text-sm text-slate-600">
                         {voter.age ?? "—"}
                       </td>
 
-                      <td className="hidden px-5 py-4 text-sm text-slate-600 md:table-cell">
+                      <td className="px-5 py-4 text-sm text-slate-600">
                         {voter.gender || "—"}
                       </td>
 
-                      <td className="hidden px-5 py-4 text-sm text-slate-600 md:table-cell">
+                      <td className="px-5 py-4 text-sm text-slate-600">
                         {voter.house_number || "—"}
                       </td>
                     </tr>
@@ -584,7 +647,7 @@ export default function Wards() {
           {/* Pagination */}
           <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-5 py-4">
             <p className="text-xs text-slate-500">
-              Page {page + 1}
+              Page {totalPages === 0 ? 0 : page + 1} of {totalPages}
             </p>
 
             <div className="flex items-center gap-2">
@@ -602,7 +665,7 @@ export default function Wards() {
 
               <button
                 type="button"
-                disabled={!hasNextPage || loadingVoters}
+                disabled={page + 1 >= totalPages || loadingVoters}
                 onClick={() => setPage((previous) => previous + 1)}
                 className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -614,6 +677,17 @@ export default function Wards() {
         </div>
       )}
 
+      {/* Refresh statistics */}
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={() => window.location.reload()}
+          className="inline-flex items-center gap-2 text-xs text-slate-500 hover:text-blue-600"
+        >
+          <RefreshCw size={14} />
+          Refresh ward statistics
+        </button>
+      </div>
     </section>
   );
 }
