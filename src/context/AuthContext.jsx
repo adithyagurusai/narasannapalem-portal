@@ -91,18 +91,43 @@ export function AuthProvider({ children }) {
     };
   }, []);
 
-  async function login(phone, password) {
-    const normalizedPhone = String(phone ?? "").trim();
-
-    const { data, error } = await supabase.auth.signInWithPassword({
-      phone: normalizedPhone,
-      password,
+  async function login(displayName, password) {
+    const { data, error } = await supabase.functions.invoke("manage-users", {
+      body: {
+        action: "login",
+        display_name: String(displayName ?? "").trim(),
+        password,
+      },
     });
 
-    if (error) throw error;
+    if (error) {
+      let response;
+      if (error.context && typeof error.context.json === "function") {
+        try {
+          response = await error.context.json();
+        } catch (parseError) {
+          console.error("Login error response could not be parsed:", parseError);
+        }
+      }
+
+      throw new Error(response?.error || error.message || "Unable to sign in.");
+    }
+
+    if (data?.error) {
+      throw new Error(data.error);
+    }
+
+    if (!data?.session?.access_token || !data?.session?.refresh_token) {
+      throw new Error("Unable to sign in.");
+    }
+
+    const { data: sessionData, error: sessionError } =
+      await supabase.auth.setSession(data.session);
+
+    if (sessionError) throw sessionError;
 
     // The auth listener loads the profile after SIGNED_IN.
-    return data;
+    return sessionData;
   }
 
   async function logout() {

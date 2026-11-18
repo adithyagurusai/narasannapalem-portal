@@ -36,9 +36,99 @@ Deno.serve(async (req: Request) => {
       throw new Error("Required Supabase environment variables are missing.");
     }
 
-    // Verify the signed-in caller.
-    const authorization = req.headers.get("Authorization");
+    // Server-side client: never expose this key to the browser.
+    const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
 
+    const body = await req.json();
+    const action = body.action;
+
+    // Resolve names only on the server; never return the underlying Auth identifier.
+    if (action === "login") {
+      const displayName = String(body.display_name ?? "").trim();
+      const password = String(body.password ?? "");
+
+      if (!displayName || displayName.length > 100 || !password) {
+        return jsonResponse(
+          { error: "Enter your full name and password." },
+          400
+        );
+      }
+
+      const { data: profiles, error: resolveError } =
+        await supabaseAdmin.rpc("resolve_login_profile", {
+          p_display_name: displayName,
+        });
+
+      if (resolveError) throw resolveError;
+
+      const profile = profiles?.[0];
+      if (!profile || profile.is_active !== true) {
+        return jsonResponse(
+          { error: "Invalid full name or password." },
+          401
+        );
+      }
+
+      const { data: authUserData, error: authUserError } =
+        await supabaseAdmin.auth.admin.getUserById(profile.id);
+
+      if (authUserError) throw authUserError;
+
+      const authUser = authUserData.user;
+      if (!authUser) {
+        return jsonResponse(
+          { error: "Invalid full name or password." },
+          401
+        );
+      }
+
+      const supabasePublic = createClient(supabaseUrl, anonKey, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+        },
+      });
+
+      let credentials:
+        | { email: string; password: string }
+        | { phone: string; password: string };
+      if (authUser.email) {
+        credentials = { email: authUser.email, password };
+      } else if (authUser.phone) {
+        credentials = { phone: authUser.phone, password };
+      } else {
+        return jsonResponse(
+          { error: "Invalid full name or password." },
+          401
+        );
+      }
+
+      const { data: signInData, error: signInError } =
+        await supabasePublic.auth.signInWithPassword(credentials);
+
+      if (signInError || !signInData.session) {
+        return jsonResponse(
+          { error: "Invalid full name or password." },
+          401
+        );
+      }
+
+      return jsonResponse({
+        session: {
+          access_token: signInData.session.access_token,
+          refresh_token: signInData.session.refresh_token,
+        },
+      });
+    }
+
+    // verify_jwt is disabled so the login action can accept unauthenticated requests.
+    // Every other action still verifies the caller and active administrator role here.
+    const authorization = req.headers.get("Authorization");
     if (!authorization?.startsWith("Bearer ")) {
       return jsonResponse({ error: "Authentication required." }, 401);
     }
@@ -62,14 +152,6 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Invalid or expired session." }, 401);
     }
 
-    // Server-side client: never expose this key to the browser.
-    const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-      },
-    });
-
     // Independently verify that the caller is an active Admin.
     const { data: callerProfile, error: profileError } =
       await supabaseAdmin
@@ -89,9 +171,6 @@ Deno.serve(async (req: Request) => {
         403
       );
     }
-
-    const body = await req.json();
-    const action = body.action;
 
     // LIST USERS
     if (action === "list") {
@@ -131,7 +210,6 @@ Deno.serve(async (req: Request) => {
         return {
           id: user.id,
           phone: user.phone ?? "",
-          email: user.email ?? "",
           display_name: profile?.display_name ?? "",
           role: profile?.role ?? "viewer",
           is_active: profile?.is_active ?? false,
@@ -144,27 +222,13 @@ Deno.serve(async (req: Request) => {
 
     // CREATE USER
     if (action === "create") {
-      const rawPhone = String(body.phone ?? "").trim();
-      const phoneDigits = rawPhone.replace(/\D/g, "");
-      const phone = phoneDigits.length === 10
-        ? `+91${phoneDigits}`
-        : phoneDigits.length === 12 && phoneDigits.startsWith("91")
-          ? `+${phoneDigits}`
-          : rawPhone;
       const password = String(body.password ?? "");
       const displayName = String(body.display_name ?? "").trim();
       const role = String(body.role ?? "viewer");
 
-      if (!/^\+91[6-9]\d{9}$/.test(phone)) {
+      if (password.length < 6) {
         return jsonResponse(
-          { error: "Enter a valid 10-digit Indian mobile number." },
-          400
-        );
-      }
-
-      if (password.length < 12) {
-        return jsonResponse(
-          { error: "Password must contain at least 12 characters." },
+          { error: "Password must contain at least 6 characters." },
           400
         );
       }
@@ -183,11 +247,13 @@ Deno.serve(async (req: Request) => {
         );
       }
 
+      const loginEmail =
+        `account-${crypto.randomUUID()}@login.narasannapalem.invalid`;
       const { data: created, error: createError } =
         await supabaseAdmin.auth.admin.createUser({
-          phone,
+          email: loginEmail,
           password,
-          phone_confirm: true,
+          email_confirm: true,
           user_metadata: {
             display_name: displayName,
           },
@@ -210,7 +276,17 @@ Deno.serve(async (req: Request) => {
 
       if (insertError) {
         // Roll back the Auth account if its profile cannot be created.
-        await supabaseAdmin.auth.admin.deleteUser(created.user.id);
+        const { error: rollbackError } =
+          await supabaseAdmin.auth.admin.deleteUser(created.user.id);
+        if (rollbackError) {
+          console.error("Failed to roll back Auth user:", rollbackError);
+        }
+        if (insertError.code === "23505") {
+          return jsonResponse(
+            { error: "An account with this full name already exists." },
+            409
+          );
+        }
         throw insertError;
       }
 

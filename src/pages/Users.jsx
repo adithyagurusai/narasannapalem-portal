@@ -50,7 +50,6 @@ export default function Users() {
 
   const [form, setForm] = useState({
     display_name: "",
-    phone: "",
     password: "",
     role: "viewer",
   });
@@ -114,7 +113,6 @@ export default function Users() {
       await invokeFunction({
         action: "create",
         display_name: form.display_name,
-        phone: form.phone,
         password: form.password,
         role: form.role,
       });
@@ -123,7 +121,6 @@ export default function Users() {
 
       setForm({
         display_name: "",
-        email: "",
         password: "",
         role: "viewer",
       });
@@ -164,7 +161,6 @@ export default function Users() {
     return (
       user.display_name?.toLowerCase().includes(searchText) ||
       user.phone?.toLowerCase().includes(searchText) ||
-      user.email?.toLowerCase().includes(searchText) ||
       user.role?.toLowerCase().includes(searchText)
     );
   });
@@ -183,7 +179,7 @@ export default function Users() {
             User Management
           </h1>
           <p className="mt-1 text-sm text-slate-500">
-            Create and manage mobile-number-based portal accounts.
+            Create and manage full-name-based portal accounts.
           </p>
         </div>
 
@@ -325,11 +321,6 @@ export default function Users() {
                         <p className="mt-1 text-xs text-slate-500">
                           {user.phone || "Mobile number not assigned"}
                         </p>
-                        {user.email && (
-                          <p className="mt-0.5 text-[11px] text-slate-400">
-                            Legacy email: {user.email}
-                          </p>
-                        )}
                       </td>
 
                       <td className="px-5 py-4">
@@ -479,35 +470,16 @@ export default function Users() {
                 />
               </FormField>
 
-              <FormField label="Mobile Number">
-                <div className="flex overflow-hidden rounded-lg border border-slate-300 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-100">
-                  <span className="border-r border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-600">+91</span>
-                  <input
-                    required
-                    type="tel"
-                    inputMode="numeric"
-                    maxLength={10}
-                    pattern="[6-9][0-9]{9}"
-                    value={form.phone}
-                    onChange={(e) =>
-                      setForm({ ...form, phone: e.target.value.replace(/\D/g, "").slice(0, 10) })
-                    }
-                    placeholder="10-digit mobile number"
-                    className="min-w-0 flex-1 px-3 py-2.5 text-sm outline-none"
-                  />
-                </div>
-              </FormField>
-
               <FormField label="Temporary Password">
                 <input
                   required
                   type="password"
-                  minLength={12}
+                  minLength={6}
                   value={form.password}
                   onChange={(e) =>
                     setForm({ ...form, password: e.target.value })
                   }
-                  placeholder="At least 12 characters"
+                  placeholder="At least 6 characters"
                   className="form-input"
                 />
                 <p className="mt-1 text-xs text-slate-500">

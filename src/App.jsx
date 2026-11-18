@@ -65,7 +65,7 @@ function PortalApp() {
     activePage === "users" && profile.role !== "admin" ? "dashboard" : activePage;
   const ActivePage = pageComponents[safeActivePage];
   const currentPage = pageDetails[safeActivePage];
-  const displayName = profile.display_name || session.user.email || "Portal User";
+  const displayName = profile.display_name || "Portal User";
   const roleLabel = profile.role
     ? profile.role.charAt(0).toUpperCase() + profile.role.slice(1)
     : "User";
