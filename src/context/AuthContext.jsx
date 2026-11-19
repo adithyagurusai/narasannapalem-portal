@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 
 import {
   createContext,
@@ -10,6 +11,31 @@ import {
 import { supabase } from "../lib/supabase.js";
 
 const AuthContext = createContext(null);
+
+function getPortalDeviceId() {
+  const storageKey = "narasannapalem_portal_device_id";
+
+  try {
+    let deviceId = window.localStorage.getItem(storageKey);
+    if (!deviceId) {
+      deviceId = window.crypto?.randomUUID?.();
+      if (!deviceId) {
+        deviceId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      }
+      window.localStorage.setItem(storageKey, deviceId);
+    }
+    return deviceId;
+  } catch {
+    // Storage can be disabled in private browsing. This fallback identifies
+    // this tab for the duration of the page lifetime.
+    if (!window.__portalDeviceId) {
+      window.__portalDeviceId =
+        window.crypto?.randomUUID?.() ||
+        `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    return window.__portalDeviceId;
+  }
+}
 
 export function AuthProvider({ children }) {
   const [session, setSession] = useState(null);
@@ -26,10 +52,9 @@ export function AuthProvider({ children }) {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, newSession) => {
-      const currentRequest = ++requestId.current;
-
       // User signed out or no session exists.
       if (!newSession) {
+        requestId.current++;
         profileRef.current = null;
         setSession(null);
         setProfile(null);
@@ -39,10 +64,20 @@ export function AuthProvider({ children }) {
 
       setSession(newSession);
 
-      // Refreshing a token does not require reloading the profile.
-      if (event === "TOKEN_REFRESHED" && profileRef.current) {
+      // Token refreshes and other same-user auth events must not tear down
+      // the authenticated shell. Only load the profile for a new session,
+      // initial hydration, or an explicit sign-in.
+      const sameUserProfile = profileRef.current?.id === newSession.user.id;
+      const needsProfile =
+        !sameUserProfile ||
+        event === "SIGNED_IN" ||
+        event === "INITIAL_SESSION";
+
+      if (!needsProfile) {
         return;
       }
+
+      const currentRequest = ++requestId.current;
 
       // Wait for the auth callback to finish before querying Supabase.
       setLoading(true);
@@ -97,12 +132,83 @@ export function AuthProvider({ children }) {
     };
   }, []);
 
+  // Keep the app-managed session alive only while the portal is visible.
+  // Returning to a tab triggers an immediate check; ordinary tab switches do
+  // not reload the page or re-fetch the user's profile.
+  useEffect(() => {
+    if (!session?.user?.id || !profile?.id) return undefined;
+
+    let disposed = false;
+    let checking = false;
+
+    const checkSession = async () => {
+      if (
+        disposed ||
+        checking ||
+        document.visibilityState !== "visible"
+      ) {
+        return;
+      }
+
+      checking = true;
+      try {
+        const { data, error } = await supabase.functions.invoke(
+          "manage-users",
+          { body: { action: "heartbeat" } }
+        );
+
+        if (disposed) return;
+
+        const status = error?.context?.status;
+        const sessionRejected =
+          status === 401 ||
+          status === 403 ||
+          data?.error === "SESSION_REVOKED" ||
+          data?.error === "ACCOUNT_INACTIVE";
+
+        if (sessionRejected) {
+          await supabase.auth.signOut();
+          return;
+        }
+
+        if (error) {
+          // A transient network issue must not log the user out.
+          console.warn("Session heartbeat failed:", error.message);
+        }
+      } catch (error) {
+        console.warn("Session heartbeat failed:", error);
+      } finally {
+        checking = false;
+      }
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        checkSession();
+      }
+    };
+
+    const intervalId = window.setInterval(checkSession, 60 * 1000);
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("focus", checkSession);
+    checkSession();
+
+    return () => {
+      disposed = true;
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("focus", checkSession);
+    };
+  }, [session?.user?.id, profile?.id]);
+
   async function login(displayName, password) {
     const { data, error } = await supabase.functions.invoke("manage-users", {
       body: {
         action: "login",
         display_name: String(displayName ?? "").trim(),
         password,
+        device_id: getPortalDeviceId(),
+        user_agent: navigator.userAgent,
       },
     });
 
@@ -137,6 +243,16 @@ export function AuthProvider({ children }) {
   }
 
   async function logout() {
+    // End the app-managed device session before clearing the Supabase token.
+    // Sign-out still proceeds if this best-effort tracking request fails.
+    const { error: sessionEndError } = await supabase.functions.invoke(
+      "manage-users",
+      { body: { action: "logout_session" } }
+    );
+    if (sessionEndError) {
+      console.warn("Unable to mark the device session as ended:", sessionEndError);
+    }
+
     const { error } = await supabase.auth.signOut();
 
     if (error) throw error;

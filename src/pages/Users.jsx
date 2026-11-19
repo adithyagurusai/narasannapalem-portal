@@ -11,6 +11,9 @@ import {
   X,
   LoaderCircle,
   AlertCircle,
+  Monitor,
+  Smartphone,
+  ShieldAlert,
 } from "lucide-react";
 import { supabase } from "../lib/supabase";
 
@@ -37,6 +40,17 @@ function formatDate(date) {
   });
 }
 
+function formatDateTime(date) {
+  if (!date) return "—";
+  return new Date(date).toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export default function Users() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -47,6 +61,11 @@ export default function Users() {
   const [currentUserId, setCurrentUserId] = useState(null);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [selectedSessionUser, setSelectedSessionUser] = useState(null);
+  const [sessionsByUser, setSessionsByUser] = useState({});
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionActionId, setSessionActionId] = useState(null);
+  const [revokingAll, setRevokingAll] = useState(false);
 
   const [form, setForm] = useState({
     display_name: "",
@@ -104,6 +123,85 @@ export default function Users() {
       mounted = false;
     };
   }, [loadUsers]);
+
+  const openUserSessions = async (user, forceRefresh = false) => {
+    setSelectedSessionUser(user);
+    setError("");
+
+    if (!forceRefresh && Object.prototype.hasOwnProperty.call(sessionsByUser, user.id)) {
+      return;
+    }
+
+    setSessionsLoading(true);
+    try {
+      const data = await invokeFunction({
+        action: "list_sessions",
+        user_id: user.id,
+      });
+      setSessionsByUser((previous) => ({
+        ...previous,
+        [user.id]: data.sessions || [],
+      }));
+    } catch (err) {
+      setError(err.message || "Unable to load device sessions.");
+    } finally {
+      setSessionsLoading(false);
+    }
+  };
+
+  const refreshSelectedSessions = async () => {
+    if (!selectedSessionUser) return;
+    await openUserSessions(selectedSessionUser, true);
+  };
+
+  const handleRevokeSession = async (session) => {
+    if (!selectedSessionUser) return;
+    const confirmed = window.confirm(
+      `Revoke this ${session.device_name || "device"} session? The device will be signed out when it next checks in.`
+    );
+    if (!confirmed) return;
+
+    setSessionActionId(session.id);
+    setError("");
+    setSuccess("");
+    try {
+      await invokeFunction({
+        action: "revoke_session",
+        user_id: selectedSessionUser.id,
+        session_record_id: session.id,
+      });
+      setSuccess("Device session revoked. It will be blocked on its next request.");
+      await openUserSessions(selectedSessionUser, true);
+    } catch (err) {
+      setError(err.message || "Unable to revoke this session.");
+    } finally {
+      setSessionActionId(null);
+    }
+  };
+
+  const handleRevokeAllSessions = async () => {
+    if (!selectedSessionUser) return;
+    const confirmed = window.confirm(
+      `Revoke every active session for ${selectedSessionUser.display_name}? This includes the current device if it belongs to this user.`
+    );
+    if (!confirmed) return;
+
+    setRevokingAll(true);
+    setError("");
+    setSuccess("");
+    try {
+      const result = await invokeFunction({
+        action: "revoke_all_sessions",
+        user_id: selectedSessionUser.id,
+      });
+      setSuccess(`${result.revoked_count || 0} session(s) revoked.`);
+      await openUserSessions(selectedSessionUser, true);
+    } catch (err) {
+      setError(err.message || "Unable to revoke sessions.");
+    } finally {
+      setRevokingAll(false);
+    }
+  };
 
   const handleCreate = async (event) => {
     event.preventDefault();
@@ -364,6 +462,14 @@ export default function Users() {
                       <td className="px-5 py-4 text-right">
                         <button
                           type="button"
+                          onClick={() => openUserSessions(user)}
+                          className="mr-2 inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 px-3 py-2 text-xs font-medium text-indigo-700 hover:bg-indigo-50"
+                        >
+                          <Monitor size={14} />
+                          Devices
+                        </button>
+                        <button
+                          type="button"
                           disabled={isUpdating}
                           onClick={async () => {
                             const entered = window.prompt(
@@ -424,6 +530,148 @@ export default function Users() {
           </div>
         )}
       </div>
+
+      {/* Device and session details are loaded only after an administrator clicks Devices. */}
+      {selectedSessionUser && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/50 p-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !sessionActionId && !revokingAll) {
+              setSelectedSessionUser(null);
+            }
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="device-session-title"
+            className="max-h-[85vh] w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl"
+          >
+            <div className="flex items-start justify-between border-b border-slate-200 p-5">
+              <div>
+                <h2 id="device-session-title" className="text-lg font-bold text-slate-900">
+                  Devices & Sessions
+                </h2>
+                <p className="mt-1 text-sm text-slate-500">
+                  {selectedSessionUser.display_name} · Login history for this account
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedSessionUser(null)}
+                className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"
+                aria-label="Close device sessions"
+              >
+                <X size={19} />
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-3">
+              <p className="text-xs text-slate-500">
+                Online means the device checked in within the last 2 minutes.
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={refreshSelectedSessions}
+                  disabled={sessionsLoading}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                >
+                  <RefreshCw size={14} className={sessionsLoading ? "animate-spin" : ""} />
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRevokeAllSessions}
+                  disabled={revokingAll || sessionsLoading || !(sessionsByUser[selectedSessionUser.id] || []).some((s) => s.is_active)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-40"
+                >
+                  {revokingAll ? <LoaderCircle size={14} className="animate-spin" /> : <ShieldAlert size={14} />}
+                  Revoke all
+                </button>
+              </div>
+            </div>
+
+            <div className="max-h-[60vh] overflow-y-auto p-5">
+              {sessionsLoading ? (
+                <div className="flex items-center justify-center gap-2 py-12 text-sm text-slate-500">
+                  <LoaderCircle size={18} className="animate-spin" />
+                  Loading device sessions...
+                </div>
+              ) : (sessionsByUser[selectedSessionUser.id] || []).length === 0 ? (
+                <div className="rounded-xl border border-dashed border-slate-300 px-5 py-12 text-center">
+                  <Monitor className="mx-auto mb-3 text-slate-400" size={28} />
+                  <p className="font-medium text-slate-700">No recorded device sessions</p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Sessions will appear here after this user signs in again.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {(sessionsByUser[selectedSessionUser.id] || []).map((session) => {
+                    const DeviceIcon = /phone|mobile|tablet|android|ios/i.test(
+                      `${session.device_name} ${session.operating_system}`
+                    ) ? Smartphone : Monitor;
+
+                    return (
+                      <article key={session.id} className="rounded-xl border border-slate-200 p-4">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="flex min-w-0 gap-3">
+                            <div className="rounded-lg bg-slate-100 p-3 text-slate-600">
+                              <DeviceIcon size={21} />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <p className="font-semibold text-slate-900">
+                                  {session.device_name || "Unknown device"}
+                                </p>
+                                {session.is_current && (
+                                  <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
+                                    This device
+                                  </span>
+                                )}
+                                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                  session.is_online
+                                    ? "bg-green-100 text-green-700"
+                                    : session.is_active
+                                      ? "bg-amber-100 text-amber-700"
+                                      : "bg-slate-100 text-slate-600"
+                                }`}>
+                                  {session.is_online ? "Online" : session.is_active ? "Inactive" : session.revoked_at ? "Revoked" : "Expired"}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-sm text-slate-600">
+                                {session.browser || "Unknown browser"} · {session.operating_system || "Unknown OS"}
+                              </p>
+                              <div className="mt-2 grid grid-cols-1 gap-x-5 gap-y-1 text-xs text-slate-500 sm:grid-cols-2">
+                                <span>Signed in: {formatDateTime(session.created_at)}</span>
+                                <span>Last active: {formatDateTime(session.last_seen_at)}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleRevokeSession(session)}
+                            disabled={!session.is_active || sessionActionId === session.id}
+                            className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {sessionActionId === session.id ? (
+                              <LoaderCircle size={14} className="animate-spin" />
+                            ) : (
+                              <Power size={14} />
+                            )}
+                            Revoke
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
 
       {/* Create user modal */}
       {showCreate && (

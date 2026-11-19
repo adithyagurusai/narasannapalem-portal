@@ -19,7 +19,7 @@ import {
 import { supabase } from "../lib/supabase.js";
 
 const PAGE_SIZE = 20;
-const SIGNED_URL_TTL_MS = 50 * 60 * 1000;
+const SIGNED_URL_TTL_MS = 4 * 60 * 1000;
 const signedPhotoUrlCache = new Map();
 
 const initialFilters = {
@@ -246,7 +246,7 @@ export default function Voters() {
     try {
       const { data, error: photoError } = await supabase.storage
         .from("voter-photos")
-        .createSignedUrl(voter.photo_path, 3600);
+        .createSignedUrl(voter.photo_path, 5 * 60);
 
       if (photoError) throw photoError;
 

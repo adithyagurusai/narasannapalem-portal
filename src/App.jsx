@@ -50,6 +50,9 @@ const pageComponents = {
 function PortalApp() {
   const { session, profile, loading, logout } = useAuth();
   const [activePage, setActivePage] = useState("dashboard");
+  // Keep visited pages mounted so changing sidebar sections does not reset
+  // page state or repeat their initial data requests when returning.
+  const [visitedPages, setVisitedPages] = useState(["dashboard"]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
 
@@ -70,7 +73,6 @@ function PortalApp() {
   );
   const safeActivePage =
     activePage === "users" && profile.role !== "admin" ? "dashboard" : activePage;
-  const ActivePage = pageComponents[safeActivePage] || Dashboard;
   const currentPage = pageDetails[safeActivePage] || pageDetails.dashboard;
   const displayName = profile.display_name || "Portal User";
   const roleLabel = profile.role
@@ -79,6 +81,9 @@ function PortalApp() {
 
   function navigateTo(page) {
     if (page === "users" && profile.role !== "admin") return;
+    setVisitedPages((previous) =>
+      previous.includes(page) ? previous : [...previous, page]
+    );
     setActivePage(page);
     setSidebarOpen(false);
   }
@@ -208,7 +213,18 @@ function PortalApp() {
               </div>
             }
           >
-            <ActivePage />
+            {visitedPages
+              .filter((page) => page !== "users" || profile.role === "admin")
+              .map((page) => {
+                const PageComponent = pageComponents[page] || Dashboard;
+                const isActive = page === safeActivePage;
+
+                return (
+                  <div key={page} hidden={!isActive} aria-hidden={!isActive}>
+                    <PageComponent />
+                  </div>
+                );
+              })}
           </Suspense>
         </div>
 

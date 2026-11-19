@@ -18,6 +18,49 @@ const jsonResponse = (data: unknown, status = 200) =>
 
 const allowedRoles = ["admin", "viewer"];
 
+function decodeJwtPayload(token: string): Record<string, unknown> {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return {};
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(
+      normalized.length + ((4 - (normalized.length % 4)) % 4),
+      "="
+    );
+    return JSON.parse(atob(padded)) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function parseDevice(userAgent: string) {
+  const ua = userAgent.toLowerCase();
+  const operating_system =
+    /windows/.test(ua) ? "Windows" :
+    /android/.test(ua) ? "Android" :
+    /(iphone|ipad|ipod)/.test(ua) ? "iOS" :
+    /(macintosh|mac os)/.test(ua) ? "macOS" :
+    /linux/.test(ua) ? "Linux" : "Unknown";
+
+  const browser =
+    /edg\//.test(ua) ? "Microsoft Edge" :
+    /opr\//.test(ua) ? "Opera" :
+    /firefox\//.test(ua) ? "Firefox" :
+    /chrome\//.test(ua) ? "Chrome" :
+    /safari\//.test(ua) ? "Safari" : "Unknown";
+
+  const device_type =
+    /(iphone|android.*mobile|windows phone)/.test(ua) ? "Phone" :
+    /(ipad|tablet)/.test(ua) ? "Tablet" :
+    "Computer";
+
+  return {
+    operating_system,
+    browser,
+    device_name: `${operating_system} ${device_type}`,
+  };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -118,9 +161,46 @@ Deno.serve(async (req: Request) => {
         );
       }
 
+      const accessToken = signInData.session.access_token;
+      const jwtPayload = decodeJwtPayload(accessToken);
+      const sessionId = String(jwtPayload.session_id ?? "");
+      const userAgent = String(body.user_agent ?? req.headers.get("user-agent") ?? "").slice(0, 1000);
+      const parsedDevice = parseDevice(userAgent);
+      const deviceId = String(body.device_id ?? "").slice(0, 100);
+
+      if (!sessionId || !deviceId) {
+        await supabasePublic.auth.signOut();
+        return jsonResponse(
+          { error: "Unable to register this device session. Please try again." },
+          500
+        );
+      }
+
+      const now = new Date();
+      const { error: sessionInsertError } = await supabaseAdmin
+        .from("user_sessions")
+        .upsert({
+          session_id: sessionId,
+          user_id: profile.id,
+          device_id: deviceId,
+          device_name: parsedDevice.device_name,
+          browser: parsedDevice.browser,
+          operating_system: parsedDevice.operating_system,
+          user_agent: userAgent,
+          created_at: now.toISOString(),
+          last_seen_at: now.toISOString(),
+          expires_at: new Date(now.getTime() + 12 * 60 * 60 * 1000).toISOString(),
+          revoked_at: null,
+        }, { onConflict: "session_id" });
+
+      if (sessionInsertError) {
+        await supabasePublic.auth.signOut();
+        throw sessionInsertError;
+      }
+
       return jsonResponse({
         session: {
-          access_token: signInData.session.access_token,
+          access_token: accessToken,
           refresh_token: signInData.session.refresh_token,
         },
       });
@@ -152,6 +232,73 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ error: "Invalid or expired session." }, 401);
     }
 
+    const bearerToken = authorization.slice("Bearer ".length);
+    const tokenPayload = decodeJwtPayload(bearerToken);
+    const currentSessionId = String(tokenPayload.session_id ?? "");
+
+    if (!currentSessionId) {
+      return jsonResponse({ error: "Session information is missing. Please sign in again." }, 401);
+    }
+
+    const { data: currentSession, error: currentSessionError } =
+      await supabaseAdmin
+        .from("user_sessions")
+        .select("id, user_id, revoked_at, expires_at")
+        .eq("session_id", currentSessionId)
+        .eq("user_id", caller.id)
+        .maybeSingle();
+
+    if (currentSessionError) throw currentSessionError;
+
+    if (
+      !currentSession ||
+      currentSession.revoked_at ||
+      new Date(currentSession.expires_at).getTime() <= Date.now()
+    ) {
+      return jsonResponse(
+        { error: "SESSION_REVOKED", message: "This session is no longer active. Please sign in again." },
+        401
+      );
+    }
+
+    if (action === "heartbeat") {
+      const { data: activeProfile, error: activeProfileError } =
+        await supabaseAdmin
+          .from("profiles")
+          .select("is_active")
+          .eq("id", caller.id)
+          .maybeSingle();
+
+      if (activeProfileError) throw activeProfileError;
+      if (!activeProfile?.is_active) {
+        return jsonResponse({ error: "ACCOUNT_INACTIVE" }, 403);
+      }
+
+      const heartbeatAt = new Date();
+      const { error: heartbeatError } = await supabaseAdmin
+        .from("user_sessions")
+        .update({
+          last_seen_at: heartbeatAt.toISOString(),
+          expires_at: new Date(heartbeatAt.getTime() + 12 * 60 * 60 * 1000).toISOString(),
+        })
+        .eq("id", currentSession.id)
+        .is("revoked_at", null);
+
+      if (heartbeatError) throw heartbeatError;
+      return jsonResponse({ session_valid: true });
+    }
+
+    if (action === "logout_session") {
+      const { error: logoutSessionError } = await supabaseAdmin
+        .from("user_sessions")
+        .update({ revoked_at: new Date().toISOString() })
+        .eq("id", currentSession.id)
+        .is("revoked_at", null);
+
+      if (logoutSessionError) throw logoutSessionError;
+      return jsonResponse({ message: "Session ended." });
+    }
+
     // Independently verify that the caller is an active Admin.
     const { data: callerProfile, error: profileError } =
       await supabaseAdmin
@@ -170,6 +317,81 @@ Deno.serve(async (req: Request) => {
         { error: "Only active administrators can manage users." },
         403
       );
+    }
+
+    // LIST DEVICES / SESSIONS FOR ONE USER. This is only called on demand by the UI.
+    if (action === "list_sessions") {
+      const userId = String(body.user_id ?? "");
+      if (!userId) return jsonResponse({ error: "User ID is required." }, 400);
+
+      const { data: sessions, error: sessionsError } = await supabaseAdmin
+        .from("user_sessions")
+        .select("id, session_id, device_id, device_name, browser, operating_system, created_at, last_seen_at, expires_at, revoked_at")
+        .eq("user_id", userId)
+        .order("last_seen_at", { ascending: false })
+        .limit(50);
+
+      if (sessionsError) throw sessionsError;
+
+      const now = Date.now();
+      const results = (sessions ?? []).map((item) => ({
+        id: item.id,
+        device_name: item.device_name,
+        browser: item.browser,
+        operating_system: item.operating_system,
+        created_at: item.created_at,
+        last_seen_at: item.last_seen_at,
+        expires_at: item.expires_at,
+        revoked_at: item.revoked_at,
+        is_current: item.session_id === currentSessionId,
+        is_online: !item.revoked_at &&
+          new Date(item.expires_at).getTime() > now &&
+          now - new Date(item.last_seen_at).getTime() <= 2 * 60 * 1000,
+        is_active: !item.revoked_at && new Date(item.expires_at).getTime() > now,
+      }));
+
+      return jsonResponse({ sessions: results });
+    }
+
+    // REVOKE ONE SESSION. RLS and Edge Function checks enforce the revocation.
+    if (action === "revoke_session") {
+      const userId = String(body.user_id ?? "");
+      const sessionRecordId = String(body.session_record_id ?? "");
+      if (!userId || !sessionRecordId) {
+        return jsonResponse({ error: "User and session IDs are required." }, 400);
+      }
+
+      const { data: revoked, error: revokeError } = await supabaseAdmin
+        .from("user_sessions")
+        .update({ revoked_at: new Date().toISOString() })
+        .eq("id", sessionRecordId)
+        .eq("user_id", userId)
+        .is("revoked_at", null)
+        .select("id")
+        .maybeSingle();
+
+      if (revokeError) throw revokeError;
+      if (!revoked) return jsonResponse({ error: "Session not found or already revoked." }, 404);
+      return jsonResponse({ message: "Session revoked successfully." });
+    }
+
+    // REVOKE ALL ACTIVE SESSIONS FOR A USER.
+    if (action === "revoke_all_sessions") {
+      const userId = String(body.user_id ?? "");
+      if (!userId) return jsonResponse({ error: "User ID is required." }, 400);
+
+      const { data: revokedRows, error: revokeAllError } = await supabaseAdmin
+        .from("user_sessions")
+        .update({ revoked_at: new Date().toISOString() })
+        .eq("user_id", userId)
+        .is("revoked_at", null)
+        .select("id");
+
+      if (revokeAllError) throw revokeAllError;
+      return jsonResponse({
+        message: "All active sessions revoked.",
+        revoked_count: revokedRows?.length ?? 0,
+      });
     }
 
     // LIST USERS
@@ -418,6 +640,16 @@ Deno.serve(async (req: Request) => {
         .eq("id", userId);
 
       if (updateError) throw updateError;
+
+      if (updates.is_active === false || updates.role !== undefined) {
+        const { error: revokeSessionsError } = await supabaseAdmin
+          .from("user_sessions")
+          .update({ revoked_at: new Date().toISOString() })
+          .eq("user_id", userId)
+          .is("revoked_at", null);
+
+        if (revokeSessionsError) throw revokeSessionsError;
+      }
 
       return jsonResponse({ message: "User updated successfully." });
     }
