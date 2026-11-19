@@ -1,5 +1,5 @@
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   Search,
@@ -19,6 +19,8 @@ import {
 import { supabase } from "../lib/supabase.js";
 
 const PAGE_SIZE = 20;
+const SIGNED_URL_TTL_MS = 50 * 60 * 1000;
+const signedPhotoUrlCache = new Map();
 
 const initialFilters = {
   ward: "",
@@ -41,6 +43,10 @@ export default function Voters() {
   const [selectedVoter, setSelectedVoter] = useState(null);
   const [photoUrl, setPhotoUrl] = useState("");
   const [profileLoading, setProfileLoading] = useState(false);
+  const photoRequestId = useRef(0);
+  const [voterGroups, setVoterGroups] = useState([]);
+  const [groupsLoading, setGroupsLoading] = useState(false);
+  const [groupsError, setGroupsError] = useState("");
 
   const [showFilters, setShowFilters] = useState(false);
 
@@ -150,6 +156,59 @@ export default function Voters() {
     };
   }, [search, filters, page]);
 
+  // Load community memberships for the currently opened voter profile.
+  useEffect(() => {
+    if (!selectedVoter?.voter_id) {
+      setVoterGroups([]);
+      setGroupsError("");
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function loadVoterGroups() {
+      setGroupsLoading(true);
+      setGroupsError("");
+
+      try {
+        const { data: memberships, error: membershipError } = await supabase
+          .from("voter_group_members")
+          .select("group_id")
+          .eq("voter_id", selectedVoter.voter_id);
+
+        if (membershipError) throw membershipError;
+
+        const groupIds = [...new Set((memberships || []).map((row) => row.group_id))];
+        if (groupIds.length === 0) {
+          if (!cancelled) setVoterGroups([]);
+          return;
+        }
+
+        const { data: groupRows, error: groupsQueryError } = await supabase
+          .from("voter_groups")
+          .select("id, name")
+          .in("id", groupIds)
+          .order("name");
+
+        if (groupsQueryError) throw groupsQueryError;
+        if (!cancelled) setVoterGroups(groupRows || []);
+      } catch (error) {
+        console.error("Voter group lookup error:", error);
+        if (!cancelled) {
+          setVoterGroups([]);
+          setGroupsError(error.message || "Unable to load this voter's group memberships.");
+        }
+      } finally {
+        if (!cancelled) setGroupsLoading(false);
+      }
+    }
+
+    loadVoterGroups();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedVoter?.voter_id]);
+
   const totalPages = Math.ceil(totalCount / PAGE_SIZE);
 
   function updateFilter(key, value) {
@@ -167,26 +226,47 @@ export default function Voters() {
     setPage(0);
   }
 
-  // Open an individual voter profile.
+  // Open an individual voter profile. Signed photo URLs are cached for
+  // 50 minutes (they expire after 60) to avoid repeat storage requests.
   async function openVoter(voter) {
+    const requestId = ++photoRequestId.current;
     setSelectedVoter(voter);
     setPhotoUrl("");
-    setProfileLoading(true);
+    setProfileLoading(Boolean(voter.photo_path));
+
+    if (!voter.photo_path) return;
+
+    const cached = signedPhotoUrlCache.get(voter.photo_path);
+    if (cached && cached.expiresAt > Date.now()) {
+      setPhotoUrl(cached.url);
+      setProfileLoading(false);
+      return;
+    }
 
     try {
-      if (voter.photo_path) {
-        const { data, error: photoError } = await supabase.storage
-          .from("voter-photos")
-          .createSignedUrl(voter.photo_path, 3600);
+      const { data, error: photoError } = await supabase.storage
+        .from("voter-photos")
+        .createSignedUrl(voter.photo_path, 3600);
 
-        if (photoError) throw photoError;
+      if (photoError) throw photoError;
 
-        setPhotoUrl(data?.signedUrl || "");
+      const signedUrl = data?.signedUrl || "";
+      if (signedUrl) {
+        signedPhotoUrlCache.set(voter.photo_path, {
+          url: signedUrl,
+          expiresAt: Date.now() + SIGNED_URL_TTL_MS,
+        });
+      }
+
+      if (requestId === photoRequestId.current) {
+        setPhotoUrl(signedUrl);
       }
     } catch (err) {
       console.error("Voter photo loading error:", err);
     } finally {
-      setProfileLoading(false);
+      if (requestId === photoRequestId.current) {
+        setProfileLoading(false);
+      }
     }
   }
 
@@ -539,6 +619,7 @@ export default function Voters() {
           className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/50 p-4"
           onMouseDown={(e) => {
             if (e.target === e.currentTarget) {
+              photoRequestId.current += 1;
               setSelectedVoter(null);
             }
           }}
@@ -557,7 +638,10 @@ export default function Voters() {
 
               <button
                 type="button"
-                onClick={() => setSelectedVoter(null)}
+                onClick={() => {
+                  photoRequestId.current += 1;
+                  setSelectedVoter(null);
+                }}
                 className="rounded-lg p-2 hover:bg-slate-100"
                 aria-label="Close profile"
               >
@@ -653,6 +737,36 @@ export default function Voters() {
                 {selectedVoter.relative_name && (
                   <p className="mt-1 text-sm text-slate-500">
                     {selectedVoter.relative_name}
+                  </p>
+                )}
+              </div>
+
+              <div className="mt-4 rounded-xl border border-slate-100 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-slate-800">Community groups</p>
+                  {groupsLoading && (
+                    <span className="text-xs text-slate-400">Loading...</span>
+                  )}
+                </div>
+
+                {groupsError ? (
+                  <p className="mt-2 text-xs text-red-600">{groupsError}</p>
+                ) : groupsLoading ? (
+                  <p className="mt-2 text-xs text-slate-500">Checking group memberships...</p>
+                ) : voterGroups.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {voterGroups.map((group) => (
+                      <span
+                        key={group.id}
+                        className="rounded-full bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700"
+                      >
+                        {group.name}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-xs text-slate-500">
+                    No community group is assigned to this voter.
                   </p>
                 )}
               </div>

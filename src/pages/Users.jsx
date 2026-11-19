@@ -87,11 +87,14 @@ export default function Users() {
     let mounted = true;
 
     const initialize = async () => {
-      const { data } = await supabase.auth.getUser();
+      // This ID is used only to label the signed-in account in the UI.
+      // Read the cached session locally; the manage-users Edge Function
+      // independently verifies the caller and active administrator role.
+      const { data } = await supabase.auth.getSession();
 
       if (!mounted) return;
 
-      setCurrentUserId(data.user?.id || null);
+      setCurrentUserId(data.session?.user?.id || null);
       await loadUsers();
     };
 

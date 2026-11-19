@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 
 import {
   LayoutDashboard,
   Users,
+  UsersRound,
   Map,
   ShieldCheck,
   Menu,
@@ -14,27 +15,33 @@ import {
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import Login from "./pages/Login";
 
-import Dashboard from "./pages/Dashboard";
-import Voters from "./pages/Voters";
-import Wards from "./pages/Wards";
-import UsersPage from "./pages/Users";
+// Load page bundles only when a user opens them. This keeps the initial
+// authenticated shell small and avoids loading Recharts on non-dashboard pages.
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const Voters = lazy(() => import("./pages/Voters"));
+const Wards = lazy(() => import("./pages/Wards"));
+const Groups = lazy(() => import("./pages/Groups"));
+const UsersPage = lazy(() => import("./pages/Users"));
 
 const navigation = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { id: "voters", label: "Voter Directory", icon: Users },
-  { id: "wards", label: "Ward Directory", icon: Map },
+  { id: "groups", label: "Community Groups", icon: UsersRound },
+  { id: "voters", label: "Voters", icon: Users },
+  { id: "wards", label: "Wards", icon: Map },
   { id: "users", label: "User Management", icon: ShieldCheck, adminOnly: true },
 ];
 
 const pageDetails = {
   dashboard: { title: "Dashboard", description: "Overview of Narasannapalem" },
-  voters: { title: "Voter Directory", description: "Search voter information" },
-  wards: { title: "Ward Directory", description: "Voter distribution across all wards" },
+  groups: { title: "Community Groups", description: "Browse community-wise voter memberships" },
+  voters: { title: "Voters", description: "Search voter information" },
+  wards: { title: "Wards", description: "Voter distribution across all wards" },
   users: { title: "User Management", description: "Manage authorized portal users" },
 };
 
 const pageComponents = {
   dashboard: Dashboard,
+  groups: Groups,
   voters: Voters,
   wards: Wards,
   users: UsersPage,
@@ -63,8 +70,8 @@ function PortalApp() {
   );
   const safeActivePage =
     activePage === "users" && profile.role !== "admin" ? "dashboard" : activePage;
-  const ActivePage = pageComponents[safeActivePage];
-  const currentPage = pageDetails[safeActivePage];
+  const ActivePage = pageComponents[safeActivePage] || Dashboard;
+  const currentPage = pageDetails[safeActivePage] || pageDetails.dashboard;
   const displayName = profile.display_name || "Portal User";
   const roleLabel = profile.role
     ? profile.role.charAt(0).toUpperCase() + profile.role.slice(1)
@@ -194,7 +201,15 @@ function PortalApp() {
         </header>
 
         <div className="min-h-[calc(100vh-144px)] p-4 sm:p-5 md:p-8">
-          <ActivePage />
+          <Suspense
+            fallback={
+              <div className="flex min-h-[40vh] items-center justify-center">
+                <p className="text-sm font-medium text-slate-500">Loading page...</p>
+              </div>
+            }
+          >
+            <ActivePage />
+          </Suspense>
         </div>
 
         <footer className="border-t border-slate-200 bg-white px-5 py-4 text-center text-xs text-slate-500">

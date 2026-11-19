@@ -18,6 +18,7 @@ export function AuthProvider({ children }) {
 
   // Prevent older profile requests from overwriting newer auth state.
   const requestId = useRef(0);
+  const profileRef = useRef(null);
 
   useEffect(() => {
     let mounted = true;
@@ -29,6 +30,7 @@ export function AuthProvider({ children }) {
 
       // User signed out or no session exists.
       if (!newSession) {
+        profileRef.current = null;
         setSession(null);
         setProfile(null);
         setLoading(false);
@@ -38,12 +40,13 @@ export function AuthProvider({ children }) {
       setSession(newSession);
 
       // Refreshing a token does not require reloading the profile.
-      if (event === "TOKEN_REFRESHED" && profile) {
+      if (event === "TOKEN_REFRESHED" && profileRef.current) {
         return;
       }
 
       // Wait for the auth callback to finish before querying Supabase.
       setLoading(true);
+      profileRef.current = null;
       setProfile(null);
 
       setTimeout(async () => {
@@ -61,17 +64,20 @@ export function AuthProvider({ children }) {
           if (!mounted || currentRequest !== requestId.current) return;
 
           if (!data || !data.is_active) {
+            profileRef.current = null;
             setSession(null);
             setProfile(null);
             await supabase.auth.signOut();
             return;
           }
 
+          profileRef.current = data;
           setProfile(data);
         } catch (error) {
           console.error("Profile loading failed:", error);
 
           if (mounted && currentRequest === requestId.current) {
+            profileRef.current = null;
             setSession(null);
             setProfile(null);
             await supabase.auth.signOut();
@@ -135,6 +141,7 @@ export function AuthProvider({ children }) {
 
     if (error) throw error;
 
+    profileRef.current = null;
     setSession(null);
     setProfile(null);
     setLoading(false);

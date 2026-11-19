@@ -29,6 +29,7 @@ export default function Wards() {
   const [wardStats, setWardStats] = useState([]);
   const [loadingStats, setLoadingStats] = useState(true);
   const [statsError, setStatsError] = useState("");
+  const [statsReloadKey, setStatsReloadKey] = useState(0);
 
   const [selectedWard, setSelectedWard] = useState("");
   const [voters, setVoters] = useState([]);
@@ -50,7 +51,8 @@ export default function Wards() {
     }
   }, [selectedWard]);
 
-  // Load statistics for all wards.
+  // Load pre-aggregated ward totals from PostgreSQL instead of downloading
+  // every voter row and counting in the browser.
   useEffect(() => {
     let cancelled = false;
 
@@ -59,48 +61,25 @@ export default function Wards() {
       setStatsError("");
 
       try {
-        const counts = {};
+        const { data, error } = await supabase.rpc("get_ward_stats");
+        if (error) throw error;
 
-        WARD_NAMES.forEach((ward) => {
-          counts[ward] = {
-            total: 0,
-            male: 0,
-            female: 0,
-          };
-        });
-
-        for (let from = 0; ; from += 1000) {
-          const { data, error } = await supabase
-            .from("voters")
-            .select("ward_number, gender")
-            .order("voter_id", { ascending: true })
-            .range(from, from + 999);
-
-          if (error) throw error;
-
-          (data || []).forEach((voter) => {
-            const ward = voter.ward_number;
-
-            if (!counts[ward]) return;
-
-            counts[ward].total += 1;
-
-            const gender = String(voter.gender || "")
-              .trim()
-              .toLowerCase();
-
-            if (gender === "male") counts[ward].male += 1;
-            if (gender === "female") counts[ward].female += 1;
-          });
-
-          if (!data || data.length < 1000) break;
-        }
+        const statsByWard = new Map(
+          (data || []).map((row) => [
+            String(row.ward_number || ""),
+            {
+              total: Number(row.total_voters || 0),
+              male: Number(row.male_voters || 0),
+              female: Number(row.female_voters || 0),
+            },
+          ])
+        );
 
         if (!cancelled) {
           setWardStats(
             WARD_NAMES.map((ward) => ({
               ward,
-              ...counts[ward],
+              ...(statsByWard.get(ward) || { total: 0, male: 0, female: 0 }),
             }))
           );
         }
@@ -122,7 +101,7 @@ export default function Wards() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [statsReloadKey]);
 
   // Load voters for the selected ward.
   useEffect(() => {
@@ -130,8 +109,10 @@ export default function Wards() {
 
     let cancelled = false;
 
-    async function loadWardVoters() {
-      setLoadingVoters(true);
+    setLoadingVoters(true);
+    const timer = setTimeout(async () => {
+      if (cancelled) return;
+
       setVoterError("");
 
       try {
@@ -199,12 +180,11 @@ export default function Wards() {
       } finally {
         if (!cancelled) setLoadingVoters(false);
       }
-    }
-
-    loadWardVoters();
+    }, 250);
 
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
   }, [selectedWard, search, page]);
 
@@ -681,7 +661,7 @@ export default function Wards() {
       <div className="flex justify-end">
         <button
           type="button"
-          onClick={() => window.location.reload()}
+          onClick={() => setStatsReloadKey((current) => current + 1)}
           className="inline-flex items-center gap-2 text-xs text-slate-500 hover:text-blue-600"
         >
           <RefreshCw size={14} />
