@@ -206,26 +206,38 @@ function PortalApp() {
         </header>
 
         <div className="min-h-[calc(100vh-144px)] p-4 sm:p-5 md:p-8">
-          <Suspense
-            fallback={
-              <div className="flex min-h-[40vh] items-center justify-center">
-                <p className="text-sm font-medium text-slate-500">Loading page...</p>
-              </div>
-            }
-          >
-            {visitedPages
-              .filter((page) => page !== "users" || profile.role === "admin")
-              .map((page) => {
-                const PageComponent = pageComponents[page] || Dashboard;
-                const isActive = page === safeActivePage;
+          {visitedPages
+            .filter((page) => page !== "users" || profile.role === "admin")
+            .map((page) => {
+              const PageComponent = pageComponents[page] || Dashboard;
+              const isActive = page === safeActivePage;
 
-                return (
-                  <div key={page} hidden={!isActive} aria-hidden={!isActive}>
+              return (
+                <div
+                  key={page}
+                  hidden={!isActive}
+                  aria-hidden={!isActive}
+                  className="min-w-0"
+                >
+                  {/*
+                    Keep every visited page mounted. Give each lazy page its
+                    own Suspense boundary so loading a newly opened page cannot
+                    suspend the entire page tree and disturb already-open pages.
+                  */}
+                  <Suspense
+                    fallback={
+                      <div className="flex min-h-[40vh] items-center justify-center">
+                        <p className="text-sm font-medium text-slate-500">
+                          Loading page...
+                        </p>
+                      </div>
+                    }
+                  >
                     <PageComponent />
-                  </div>
-                );
-              })}
-          </Suspense>
+                  </Suspense>
+                </div>
+              );
+            })}
         </div>
 
         <footer className="border-t border-slate-200 bg-white px-5 py-4 text-center text-xs text-slate-500">
